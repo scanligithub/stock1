@@ -1,12 +1,12 @@
-name: 全市场 K线 + 资金流 数据采集（双数据源）
+# .github/workflows/full_ashare_pipeline.yml
+name: A股全市场 K线 + 资金流 双数据源采集（2025最新生产版）
 
 on:
   workflow_dispatch:
 
 jobs:
-  # ======================== 1. 准备任务 ========================
+  # ======================== 1. 准备任务分片 ========================
   prepare:
-    name: 获取股票列表并随机切分
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Baostock
+      - name: Install baostock
         run: pip install baostock pandas
 
       - name: Generate task slices
@@ -32,13 +32,11 @@ jobs:
   # ======================== 2. 并行下载 K线 ========================
   download-kline:
     needs: prepare
-    name: K线下载 - 分区 ${{ matrix.task_index }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         task_index: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
       max-parallel: 20
-      fail-fast: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,10 +66,9 @@ jobs:
           name: kline_part_${{ matrix.task_index }}
           path: data_kline/
 
-  # ======================== 3. 合并 K线 + 质检 ========================
+  # ======================== 3. 合并 K线 ========================
   collect-kline:
     needs: download-kline
-    name: 合并 K线 + 质检
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -90,39 +87,33 @@ jobs:
       - name: Install deps
         run: pip install pandas pyarrow tqdm zstandard
 
-      - name: Collect & QC K线
+      - name: Collect K线
         run: python scripts/collect_kdata.py
 
-      - name: Upload K线小文件
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: kdata-small-files
           path: kdata/
-
-      - name: Upload 合并K线
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: full-kdata-parquet-optimized
           path: full_kdata.parquet
-
-      - name: Upload K线质检报告
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: data-quality-report-kline
           path: data_quality_report_kline.json
 
-  # ======================== 4. 并行下载 资金流 ========================
+  # ======================== 4. 并行下载 资金流（关键修复！） ========================
   download-fundflow:
     needs: collect-kline
-    name: 资金流下载 - 分区 ${{ matrix.task_index }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         task_index: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
       max-parallel: 20
-      fail-fast: false
     steps:
-      - name: Checkout
+      - name: Checkout repository                                 # 必须加这一行！
         uses: actions/checkout@v4
 
       - name: Download task slices
@@ -139,7 +130,7 @@ jobs:
       - name: Install deps
         run: pip install requests pandas pyarrow tqdm
 
-      - name: Download 资金流
+      - name: Download 资金流（新浪最新稳定版）
         env:
           TASK_INDEX: ${{ matrix.task_index }}
         run: python scripts/download_sina_fundflow.py
@@ -150,10 +141,9 @@ jobs:
           name: fundflow_part_${{ matrix.task_index }}
           path: data_fundflow/
 
-  # ======================== 5. 合并 资金流 + 质检 ========================
+  # ======================== 5. 合并 资金流 ========================
   collect-fundflow:
     needs: download-fundflow
-    name: 合并资金流 + 质检
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -172,23 +162,19 @@ jobs:
       - name: Install deps
         run: pip install pandas pyarrow tqdm zstandard
 
-      - name: Collect & QC 资金流
+      - name: Collect 资金流
         run: python scripts/collect_fundflow.py
 
-      - name: Upload 资金流小文件
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: fundflow-small-files
           path: fundflow_small/
-
-      - name: Upload 合并资金流
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: full-fundflow-parquet-optimized
           path: full_fundflow.parquet
-
-      - name: Upload 资金流质检报告
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: data-quality-report-fundflow
           path: data_quality_report_fundflow.json
