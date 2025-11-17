@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 TASK_COUNT = 20
 OUTPUT_DIR = "task_slices"
-TEST_STOCK_LIMIT = 100          # 删除此行 + 下方切片即为全量
+TEST_STOCK_LIMIT = 1000          # 删除此行 + 下方切片即为全量
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
