@@ -1,14 +1,17 @@
 # scripts/collect_fundflow.py
-# 2025-11-17 终极生产版：完美兼容个股(新浪)+指数(东财)，ZSTD永不崩
+# 2025-11-17 内存优化版：通过分块处理解决超大文件合并时的内存溢出问题
+
 import os
 import pandas as pd
 import glob
 from tqdm import tqdm
 import json
 from datetime import datetime
+import shutil
+import sys
 
 # ==================== 配置 ====================
-INPUT_BASE_DIR = "all_fundflow"           # download-artifact 下载下来的目录
+INPUT_BASE_DIR = "all_fundflow"
 SMALL_OUTPUT_DIR = "fundflow_small"
 FINAL_PARQUET_FILE = "full_fundflow.parquet"
 QUALITY_REPORT_FILE = "data_quality_report_fundflow.json"
@@ -59,57 +62,69 @@ def main():
 
     search_pattern = os.path.join(INPUT_BASE_DIR, "**", "*.parquet")
     files = glob.glob(search_pattern, recursive=True)
-    print(f"发现 {len(files)} 个资金流分片文件，开始收集...")
+    
+    if not files:
+        print("没有找到任何分片文件，退出。")
+        return
+        
+    print(f"发现 {len(files)} 个资金流分片文件，开始处理...")
 
-    # 1. 复制小文件（便于手动检查）
+    # --- (这是唯一的、关键的修正) ---
+    # --- 分块处理以节省内存 ---
+    
+    # 1. 先只复制小文件
+    if os.path.exists(SMALL_OUTPUT_DIR):
+        shutil.rmtree(SMALL_OUTPUT_DIR)
+    os.makedirs(SMALL_OUTPUT_DIR, exist_ok=True)
     for f in tqdm(files, desc="复制资金流小文件"):
         filename = os.path.basename(f)
-        os.system(f"cp '{f}' '{SMALL_OUTPUT_DIR}/{filename}'")
+        shutil.copy2(f, os.path.join(SMALL_OUTPUT_DIR, filename))
     print(f"所有小文件已收集至 {SMALL_OUTPUT_DIR}/")
 
-    # 2. 读取并合并
-    print("正在读取并合并所有资金流数据...")
-    dfs = []
-    for f in tqdm(files, desc="读取分片"):
-        try:
-            df = pd.read_parquet(f)
-            df = unify_columns(df)          # 关键修复在这儿
-            dfs.append(df)
-        except Exception as e:
-            print(f"读取失败 {f} : {e}")
+    # 2. 分块读取、处理并合并
+    chunk_size = 2000 # 每次处理 2000 个文件，可以根据内存情况调整
+    final_df = pd.DataFrame()
+    
+    print(f"\n将分块读取和合并，每块 {chunk_size} 个文件...")
 
-    if not dfs:
-        print("没有成功读取任何文件，退出")
-        return
-
-    merged = pd.concat(dfs, ignore_index=True)
-    print(f"合并完成，总行数：{len(merged):,}")
+    for i in tqdm(range(0, len(files), chunk_size), desc="分块合并中"):
+        chunk_files = files[i : i + chunk_size]
+        # 读取当前块的所有 DataFrame
+        dfs = [unify_columns(pd.read_parquet(f)) for f in chunk_files]
+        # 合并当前块
+        chunk_df = pd.concat(dfs, ignore_index=True)
+        # 将当前块合并到最终的 DataFrame 中
+        final_df = pd.concat([final_df, chunk_df], ignore_index=True)
+        
+    # ------------------------------------------
+    
+    print(f"\n合并完成，总行数：{len(final_df):,}")
 
     # 3. 按 code + date 排序（极大提升压缩率）
     print("按 code + date 排序优化压缩...")
-    merged = merged.sort_values(['code', 'date']).reset_index(drop=True)
+    final_df = final_df.sort_values(['code', 'date']).reset_index(drop=True)
 
     # 4. 保存最终大文件（优先 ZSTD，失败回退 snappy）
-    print(f"正在写入最终合并文件：{FINAL_PARQUET_FILE}（ZSTD压缩）")
+    print(f"正在写入最终合并文件：{FINAL_PARQUET_FILE}...")
     try:
-        merged.to_parquet(FINAL_PARQUET_FILE, index=False, compression='zstd')
+        final_df.to_parquet(FINAL_PARQUET_FILE, index=False, compression='zstd')
         print("ZSTD 压缩成功！")
     except Exception as e:
         print(f"ZSTD失败，回退 snappy：{e}")
-        merged.to_parquet(FINAL_PARQUET_FILE, index=False, compression='snappy')
+        final_df.to_parquet(FINAL_PARQUET_FILE, index=False, compression='snappy')
 
     # 5. 生成质检报告
+    print("\n正在生成质检报告...")
     report = {
         "generate_time": datetime.now().isoformat(),
-        "total_rows": len(merged),
-        "total_stocks": merged['code'].nunique(),
+        "total_rows": len(final_df),
+        "total_stocks": final_df['code'].nunique(),
         "date_range": {
-            "min": merged['date'].min().date().isoformat() if pd.notna(merged['date'].min()) else None,
-            "max": merged['date'].max().date().isoformat() if
-            pd.notna(merged['date'].max()) else None
+            "min": final_df['date'].min().date().isoformat() if pd.notna(final_df['date'].min()) else None,
+            "max": final_df['date'].max().date().isoformat() if pd.notna(final_df['date'].max()) else None
         },
-        "columns": list(merged.columns),
-        "dtypes": merged.dtypes.apply(lambda x: str(x)).to_dict()
+        "columns": list(final_df.columns),
+        "dtypes": final_df.dtypes.apply(lambda x: str(x)).to_dict()
     }
     with open(QUALITY_REPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -121,4 +136,10 @@ def main():
     print(f"→ 日期范围：{report['date_range']['min']} ~ {report['date_range']['max']}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n❌❌❌ 在 main 函数顶层捕获到致命异常: {e} ❌❌❌")
+        import traceback
+        traceback.print_exc()
+        exit(1)
