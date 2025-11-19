@@ -19,7 +19,6 @@ try:
 except ImportError:
     PYARROW_AVAILABLE = False
 
-
 # ==================== 配置 ====================
 INPUT_BASE_DIR = "all_fundflow"
 SMALL_OUTPUT_DIR = "fundflow_small"
@@ -28,40 +27,63 @@ QUALITY_REPORT_FILE = "data_quality_report_fundflow.json"
 
 os.makedirs(SMALL_OUTPUT_DIR, exist_ok=True)
 
-
 # ==================== 系统资源监控函数 ====================
 def print_system_stats():
     """打印当前的内存和硬盘使用情况"""
     print("-" * 20)
-    # 打印内存 (需要 psutil 库，如果未安装则跳过)
     try:
         import psutil
         mem = psutil.virtual_memory()
-        print(f"  -> 📊 系统状态: RAM 可用 {mem.available / (1024**3):.2f} GB / 总计 {mem.total / (1024**3):.2f} GB ({mem.percent}%)")
+        print(f"  -> 📊 RAM Usage: {mem.used / (1024**3):.2f} GB / {mem.total / (1024**3):.2f} GB ({mem.percent}%)")
     except ImportError:
-        print("  -> 📊 系统状态: 未安装 psutil，无法获取内存信息。请运行 'pip install psutil'")
+        print("  -> 📊 RAM Usage: psutil not installed.")
     
-    # 打印硬盘
     try:
         disk = shutil.disk_usage("/")
-        print(f"  -> 📊 系统状态: 硬盘可用 {disk.free / (1024**3):.2f} GB / 总计 {disk.total / (1024**3):.2f} GB ({disk.used / disk.total * 100:.1f}%)")
+        print(f"  -> 📊 Disk Usage: {disk.used / (1024**3):.2f} GB / {disk.total / (1024**3):.2f} GB ({disk.used / disk.total * 100:.1f}%)")
     except Exception as e:
-        print(f"  -> 📊 系统状态: 获取硬盘信息失败: {e}")
+        print(f"  -> 📊 Disk Usage: Failed to get info: {e}")
     print("-" * 20)
 
 
-# ==================== 统一字段修复函数 ====================
+# ==================== 统一字段修复函数 (您的版本) ====================
 def unify_columns(df: pd.DataFrame) -> pd.DataFrame:
     """把个股(新浪)和指数(东财)的字段彻底统一"""
-    # ... (此函数内容与您之前的版本完全相同，此处省略以保持简洁)
-    # ... 请确保您使用的是包含了所有重命名和类型转换逻辑的完整版本
-    return df
+    if 'open' in df.columns and 'close' not in df.columns:
+        df = df.rename(columns={'open': 'close'})
+    elif 'open' in df.columns and 'close' in df.columns:
+        df = df.drop(columns=['open'])
 
+    unwanted = ['high', 'low', 'volume', 'amount', 'pre_close', 'open_interest']
+    df = df.drop(columns=[c for c in unwanted if c in df.columns], errors='ignore')
+
+    required_cols = [
+        'date', 'code', 'close', 'pct_change', 'turnover_rate',
+        'net_flow_amount', 'main_net_flow', 'super_large_net_flow',
+        'large_net_flow', 'medium_small_net_flow'
+    ]
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    numeric_cols = [
+        'close', 'pct_change', 'turnover_rate', 'net_flow_amount',
+        'main_net_flow', 'super_large_net_flow', 'large_net_flow', 'medium_small_net_flow'
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+    # 确保返回的列顺序与 required_cols 一致
+    return df[required_cols]
 
 # ==================== 主流程 ====================
 def main():
     if not PYARROW_AVAILABLE:
-        print("❌ 致命错误: 未找到 'pyarrow' 库，无法进行 Parquet 操作。请运行 'pip install pyarrow'。")
+        print("❌ 致命错误: 未找到 'pyarrow' 库。请运行 'pip install pyarrow zstandard psutil'。")
         sys.exit(1)
         
     print("开始 资金流数据收集与合并流程...")
@@ -71,21 +93,17 @@ def main():
     files = glob.glob(search_pattern, recursive=True)
     
     if not files:
-        print("没有找到任何分片文件，退出。")
-        return
+        print("没有找到任何分片文件，退出。"); return
         
     print(f"发现 {len(files)} 个资金流分片文件，开始处理...")
 
-    # --- 阶段 1: 复制小文件 ---
+    # --- 阶段 1: 复制小文件 (保持不变) ---
     if os.path.exists(SMALL_OUTPUT_DIR):
         shutil.rmtree(SMALL_OUTPUT_DIR)
     os.makedirs(SMALL_OUTPUT_DIR, exist_ok=True)
     for f in tqdm(files, desc="复制资金流小文件"):
-        try:
-            filename = os.path.basename(f)
-            shutil.copy2(f, os.path.join(SMALL_OUTPUT_DIR, filename))
-        except Exception as e:
-            print(f"\n⚠️ 复制文件 {f} 失败: {e}")
+        filename = os.path.basename(f)
+        shutil.copy2(f, os.path.join(SMALL_OUTPUT_DIR, filename))
     print(f"所有小文件已收集至 {SMALL_OUTPUT_DIR}/")
 
     # --- 阶段 2: 流式写入，节省内存 ---
@@ -98,34 +116,27 @@ def main():
         for i in tqdm(range(0, len(files), chunk_size), desc="分块写入 Parquet 中"):
             chunk_files = files[i : i + chunk_size]
             
-            # 读取当前块的所有 DataFrame
             dfs = [unify_columns(pd.read_parquet(f)) for f in chunk_files]
             chunk_df = pd.concat(dfs, ignore_index=True)
             
-            # 转换为 Arrow Table
             table = pa.Table.from_pandas(chunk_df, preserve_index=False)
             
             if writer is None:
-                # 第一次写入，创建文件和 ParquetWriter 对象
                 writer = pq.ParquetWriter(FINAL_PARQUET_FILE, table.schema, compression='zstd' if 'zstandard' in sys.modules else 'snappy')
             
-            # 将当前块的 table 写入文件
             writer.write_table(table)
             
             print(f"\n块 {i//chunk_size + 1} 写入完成。")
-            print_system_stats() # 每次写入后都打印资源情况
+            print_system_stats()
 
     finally:
-        # 确保 writer 被关闭
         if writer:
             writer.close()
             print("\nParquet writer 已关闭。")
 
-    print(f"\n合并写入完成，正在读取最终文件进行排序和质检...")
-    
     # --- 阶段 3: 最终排序与质检 ---
-    # 这一步依然是内存瓶颈，如果数据量过大（几十GB），这里可能依然会失败
-    # 但对于您几GB的数据量，7GB内存通常足够
+    print(f"\n合并写入完成，正在读取最终文件 {FINAL_PARQUET_FILE} 进行排序和质检...")
+    
     try:
         final_df = pd.read_parquet(FINAL_PARQUET_FILE)
         
@@ -135,11 +146,30 @@ def main():
         print(f"正在重新写入已排序的最终文件：{FINAL_PARQUET_FILE}...")
         final_df.to_parquet(FINAL_PARQUET_FILE, index=False, compression='zstd' if 'zstandard' in sys.modules else 'snappy')
         print("最终文件写入成功！")
+        print_system_stats()
         
-        # ... (在这里插入您完整的 run_quality_check 函数定义) ...
-        # run_quality_check(final_df)
-        print("\n(跳过质检报告生成，您可以后续添加)")
-        
+        # --- 阶段 4: 生成质检报告 (您的版本) ---
+        print("\n正在生成质检报告...")
+        report = {
+            "generate_time": datetime.now().isoformat(),
+            "total_rows": len(final_df),
+            "total_stocks": final_df['code'].nunique(),
+            "date_range": {
+                "min": final_df['date'].min().date().isoformat() if pd.notna(final_df['date'].min()) else None,
+                "max": final_df['date'].max().date().isoformat() if pd.notna(final_df['date'].max()) else None
+            },
+            "columns": list(final_df.columns),
+            "dtypes": final_df.dtypes.apply(lambda x: str(x)).to_dict()
+        }
+        with open(QUALITY_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print(f"质检报告已生成：{QUALITY_REPORT_FILE}")
+
+        print("\n资金流全市场数据合并完成！")
+        print(f"→ 总行数：{report['total_rows']:,}")
+        print(f"→ 股票数：{report['total_stocks']:,}")
+        print(f"→ 日期范围：{report['date_range']['min']} ~ {report['date_range']['max']}")
+
     except Exception as e:
         print(f"\n❌ 在最终排序或质检阶段发生错误: {e}")
         traceback.print_exc()
