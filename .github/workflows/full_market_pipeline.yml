@@ -160,7 +160,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install pandas pyarrow tqdm zstandard psutil
+        run: pip install pandas pyarrow tqdm zstandard psutil duckdb
 
       - name: Collect 资金流
         run: python scripts/collect_fundflow.py
