@@ -38,7 +38,7 @@ def main():
                 stock_list.append({'code': code, 'name': name})
 
         print(f"获取到 {len(stock_list)} 只股票")
-        # stock_list = stock_list[1000:1100]   # 删除此行即全量
+        stock_list = stock_list[0:100]   # 删除此行即全量
         print(f"测试模式：仅处理前 {len(stock_list)} 只")
 
         random.shuffle(stock_list)
