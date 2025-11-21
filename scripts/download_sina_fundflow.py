@@ -9,22 +9,20 @@ from tqdm import tqdm
 import time
 import sys
 import traceback
-# from pathlib import Path # <-- 我们不再需要这个库了
+from pathlib import Path # 引入 pathlib
 
 # ==================== 配置 ====================
 OUTPUT_DIR = "data_fundflow"
 PAGE_SIZE = 50
 TASK_INDEX = int(os.getenv("TASK_INDEX", 0))
+# (关键) 确保目录在脚本开始时就存在
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# (关键) 唯一的 API 接口
 SINA_API = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb"
-
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://vip.stock.finance.sina.com.cn/'
 }
-
 COLUMN_MAP = {
     'opendate': 'date', 'trade': 'close', 'changeratio': 'pct_change',
     'turnover': 'turnover_rate', 'netamount': 'net_flow_amount',
@@ -34,7 +32,7 @@ COLUMN_MAP = {
 
 # ==================== 下载函数 (保持不变) ====================
 def get_fundflow(code: str) -> pd.DataFrame:
-    """从新浪获取指定标的的历史资金流 (分页)"""
+    # ... (此函数内容与您之前的版本完全相同)
     all_data = []
     page = 1
     code_api = code.replace('.', '')
@@ -67,6 +65,7 @@ def main():
 
     if not stocks:
         print("🟡 本分区任务列表为空，正常结束。")
+        # 确保 upload-artifact 能找到目录
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
         return
@@ -84,6 +83,7 @@ def main():
             continue
 
         try:
+            # ... (您的数据清洗逻辑保持不变) ...
             available_cols = [k for k in COLUMN_MAP.keys() if k in df_raw.columns]
             if not available_cols:
                 continue
@@ -98,7 +98,7 @@ def main():
                 df_cleaned[money_cols] = df_cleaned[money_cols] * 10000
             df_final = df_cleaned.sort_values('date').reset_index(drop=True)
             output_path = f"{OUTPUT_DIR}/{code}.parquet"
-            df_final.to_parquet(output_path, index=False, compression='zstd' if 'zstandard' in sys.modules else 'snappy')
+            df_final.to_parquet(output_path, index=False)
             success_count += 1
         except Exception as e:
             print(f"  -> ❌ 在处理 {name} ({code}) 的数据时出错: {e}")
@@ -106,17 +106,11 @@ def main():
     # --- (这是唯一的、关键的修正) ---
     print(f"\n分区 {TASK_INDEX + 1} 完成！成功下载 {success_count}/{len(stocks)} 只标的")
     
-    if success_count == 0 and len(stocks) > 0:
-        print("\n" + "="*60)
-        print(f"⚠️ 警告: 分区 {TASK_INDEX + 1} 未能成功下载任何一只股票的数据。")
-        print(f"   将在输出目录 '{OUTPUT_DIR}' 中创建一个空的标志文件。")
-        print("="*60)
-        
-        # 使用最基础、最可靠的 open() 来创建空文件
-        placeholder_file = os.path.join(OUTPUT_DIR, ".no_data_found_in_this_partition")
-        with open(placeholder_file, "w") as f:
-            f.write("This partition failed to download any data.")
-        print(f"✅ 已创建标志文件: {placeholder_file}")
+    # 无论下载是否成功，都确保输出目录非空
+    if not os.listdir(OUTPUT_DIR):
+        print(f"⚠️ 警告: 输出目录 '{OUTPUT_DIR}' 为空。创建一个占位文件以确保 Artifact 上传。")
+        # 创建一个空的 .gitkeep 文件作为占位符
+        Path(f"{OUTPUT_DIR}/.gitkeep").touch()
     # ---------------------------------------------
 
 if __name__ == "__main__":
