@@ -1,5 +1,5 @@
 # scripts/download_sina_fundflow.py
-# 2025-11-20 最终高容错版：无论成功与否，都确保产出目录非空
+# 2025-11-20 最终高容错版：使用最可靠的方法创建占位文件
 
 import os
 import json
@@ -9,20 +9,21 @@ from tqdm import tqdm
 import time
 import sys
 import traceback
-from pathlib import Path # 引入 pathlib
+# from pathlib import Path # <-- 彻底移除 pathlib
 
 # ==================== 配置 ====================
 OUTPUT_DIR = "data_fundflow"
 PAGE_SIZE = 50
 TASK_INDEX = int(os.getenv("TASK_INDEX", 0))
-# (关键) 确保目录在脚本开始时就存在
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SINA_API = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb"
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://vip.stock.finance.sina.com.cn/'
 }
+
 COLUMN_MAP = {
     'opendate': 'date', 'trade': 'close', 'changeratio': 'pct_change',
     'turnover': 'turnover_rate', 'netamount': 'net_flow_amount',
@@ -32,7 +33,7 @@ COLUMN_MAP = {
 
 # ==================== 下载函数 (保持不变) ====================
 def get_fundflow(code: str) -> pd.DataFrame:
-    # ... (此函数内容与您之前的版本完全相同)
+    """从新浪获取指定标的的历史资金流 (分页)"""
     all_data = []
     page = 1
     code_api = code.replace('.', '')
@@ -65,9 +66,6 @@ def main():
 
     if not stocks:
         print("🟡 本分区任务列表为空，正常结束。")
-        # 确保 upload-artifact 能找到目录
-        if not os.path.exists(OUTPUT_DIR):
-            os.makedirs(OUTPUT_DIR)
         return
 
     print(f"本分区共 {len(stocks)} 只标的")
@@ -83,7 +81,6 @@ def main():
             continue
 
         try:
-            # ... (您的数据清洗逻辑保持不变) ...
             available_cols = [k for k in COLUMN_MAP.keys() if k in df_raw.columns]
             if not available_cols:
                 continue
@@ -106,11 +103,16 @@ def main():
     # --- (这是唯一的、关键的修正) ---
     print(f"\n分区 {TASK_INDEX + 1} 完成！成功下载 {success_count}/{len(stocks)} 只标的")
     
-    # 无论下载是否成功，都确保输出目录非空
+    # 使用 os.listdir() 检查目录是否为空，这是最可靠的方法
     if not os.listdir(OUTPUT_DIR):
-        print(f"⚠️ 警告: 输出目录 '{OUTPUT_DIR}' 为空。创建一个占位文件以确保 Artifact 上传。")
-        # 创建一个空的 .gitkeep 文件作为占位符
-        Path(f"{OUTPUT_DIR}/.gitkeep").touch()
+        print(f"⚠️ 警告: 输出目录 '{OUTPUT_DIR}' 为空。正在创建一个占位文件...")
+        
+        # 使用最基础、最不可能失败的 open() 来创建空文件
+        placeholder_file = os.path.join(OUTPUT_DIR, ".gitkeep")
+        with open(placeholder_file, "w") as f:
+            f.write("No data downloaded in this partition.")
+        
+        print(f"✅ 已创建占位文件: {placeholder_file}")
     # ---------------------------------------------
 
 if __name__ == "__main__":
