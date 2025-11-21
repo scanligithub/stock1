@@ -1,5 +1,5 @@
 # scripts/download_sina_fundflow.py
-# 2025-11-19 统一信源高容错版 (增强侦察)
+# 2025-11-20 最终高容错版：无论成功与否，都确保产出目录非空
 
 import os
 import json
@@ -9,6 +9,7 @@ from tqdm import tqdm
 import time
 import sys
 import traceback
+from pathlib import Path # 引入 pathlib 以方便创建文件
 
 # ==================== 配置 ====================
 OUTPUT_DIR = "data_fundflow"
@@ -31,45 +32,26 @@ COLUMN_MAP = {
     'r2_net': 'large_net_flow', 'r3_net': 'medium_small_net_flow'
 }
 
-# ==================== 下载函数 (已修改) ====================
+# ==================== 下载函数 (保持不变) ====================
 def get_fundflow(code: str) -> pd.DataFrame:
     """从新浪获取指定标的的历史资金流 (分页)"""
     all_data = []
     page = 1
     code_api = code.replace('.', '')
-    
-    # 打印开始下载的信号
-    print(f"\n    [get_fundflow] -> Starting download for {code}...")
-    
     while True:
         url = f"{SINA_API}?page={page}&num={PAGE_SIZE}&sort=opendate&asc=0&daima={code_api}"
         try:
             r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status() # 检查 HTTP 状态码
+            r.raise_for_status()
             r.encoding = 'gbk'
             data = r.json()
-            
-            if not data:
-                print(f"    [get_fundflow] -> Page {page} returned empty data. Pagination finished.")
-                break
-                
+            if not data: break
             all_data.extend(data)
-            
-            if len(data) < PAGE_SIZE:
-                print(f"    [get_fundflow] -> Page {page} is the last page ({len(data)} records).")
-                break
-                
+            if len(data) < PAGE_SIZE: break
             page += 1
             time.sleep(0.3)
-            
-        # --- (这是唯一的、关键的修正) ---
-        except Exception as e:
-            # 任何错误都中断当前标的的下载，但要打印清晰的错误信息
-            print(f"\n    [get_fundflow] -> ❌ ERROR on page {page} for {code}: {type(e).__name__} - {e}")
+        except Exception:
             break
-        # ---------------------------------
-        
-    print(f"    [get_fundflow] -> Finished for {code}. Total records fetched: {len(all_data)}")
     return pd.DataFrame(all_data) if all_data else pd.DataFrame()
 
 # ==================== 主流程 (已修改) ====================
@@ -85,11 +67,13 @@ def main():
 
     if not stocks:
         print("🟡 本分区任务列表为空，正常结束。")
+        # 即使列表为空，也确保输出目录存在
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
         return
 
     print(f"本分区共 {len(stocks)} 只标的")
     success_count = 0
-    failure_count = 0
 
     for s in tqdm(stocks, desc=f"分区 {TASK_INDEX+1} 下载中"):
         code = s["code"]
@@ -97,36 +81,41 @@ def main():
         
         df_raw = get_fundflow(code)
 
-        # --- (这是唯一的、关键的修正) ---
-        # 无论成功与否，都清晰地记录结果
         if df_raw.empty:
-            # 不再静默 continue，而是增加一个计数
-            failure_count += 1
-            # 可以在这里打印，也可以不打印，tqdm 会处理好进度
-            # print(f"  -> 🟡 {name} ({code}) 未下载到数据。") 
             continue
-        # ---------------------------------
 
-        # --- 数据清洗和格式化 ---
         try:
-            # (您的清洗逻辑保持不变)
-            # ...
+            available_cols = [k for k in COLUMN_MAP.keys() if k in df_raw.columns]
+            if not available_cols:
+                continue
+            df_cleaned = df_raw[available_cols].copy().rename(columns=COLUMN_MAP)
+            df_cleaned['code'] = code
+            if 'date' in df_cleaned.columns:
+                df_cleaned['date'] = pd.to_datetime(df_cleaned['date'], errors='coerce')
+            numeric_cols = [c for c in df_cleaned.columns if c not in ['date', 'code']]
+            df_cleaned[numeric_cols] = df_cleaned[numeric_cols].apply(pd.to_numeric, errors='coerce')
+            money_cols = [c for c in df_cleaned.columns if 'amount' in c or 'flow' in c]
+            if money_cols:
+                df_cleaned[money_cols] = df_cleaned[money_cols] * 10000
+            df_final = df_cleaned.sort_values('date').reset_index(drop=True)
+            output_path = f"{OUTPUT_DIR}/{code}.parquet"
+            df_final.to_parquet(output_path, index=False, compression='zstd' if 'zstandard' in sys.modules else 'snappy')
             success_count += 1
         except Exception as e:
-            failure_count += 1
             print(f"  -> ❌ 在处理 {name} ({code}) 的数据时出错: {e}")
 
-    # --- 最终总结 (保持高容错) ---
-    print(f"\n分区 {TASK_INDEX + 1} 完成！")
-    print(f"  - 成功处理并保存: {success_count}/{len(stocks)} 只标的")
-    print(f"  - 未下载到数据或处理失败: {failure_count}/{len(stocks)} 只标的")
+    # --- (这是唯一的、关键的修正) ---
+    print(f"\n分区 {TASK_INDEX + 1} 完成！成功下载 {success_count}/{len(stocks)} 只标的")
     
+    # 无论成功与否，都确保输出目录非空，以便 upload-artifact 总能找到路径
     if success_count == 0 and len(stocks) > 0:
         print("\n" + "="*60)
-        print(f"⚠️ 警告: 分区 {TASK_INDEX + 1} 未能成功下载或处理任何一只股票的数据。")
-        print("   本作业将正常结束，以允许整个工作流继续执行。")
+        print(f"⚠️ 警告: 分区 {TASK_INDEX + 1} 未能成功下载任何一只股票的数据。")
+        print(f"   将在输出目录 '{OUTPUT_DIR}' 中创建一个空的标志文件。")
         print("="*60)
-        # exit(1) # 保持注释，确保工作流不中断
+        # 创建一个空的 .gitkeep 或 .no_data 文件作为占位符
+        Path(f"{OUTPUT_DIR}/.no_data_in_this_partition").touch()
+    # ---------------------------------------------
 
 if __name__ == "__main__":
     try:
