@@ -9,7 +9,7 @@ from tqdm import tqdm
 import time
 import sys
 import traceback
-from pathlib import Path # 引入 pathlib 以方便创建文件
+# from pathlib import Path # <-- 我们不再需要这个库了
 
 # ==================== 配置 ====================
 OUTPUT_DIR = "data_fundflow"
@@ -67,7 +67,6 @@ def main():
 
     if not stocks:
         print("🟡 本分区任务列表为空，正常结束。")
-        # 即使列表为空，也确保输出目录存在
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
         return
@@ -107,14 +106,17 @@ def main():
     # --- (这是唯一的、关键的修正) ---
     print(f"\n分区 {TASK_INDEX + 1} 完成！成功下载 {success_count}/{len(stocks)} 只标的")
     
-    # 无论成功与否，都确保输出目录非空，以便 upload-artifact 总能找到路径
     if success_count == 0 and len(stocks) > 0:
         print("\n" + "="*60)
         print(f"⚠️ 警告: 分区 {TASK_INDEX + 1} 未能成功下载任何一只股票的数据。")
         print(f"   将在输出目录 '{OUTPUT_DIR}' 中创建一个空的标志文件。")
         print("="*60)
-        # 创建一个空的 .gitkeep 或 .no_data 文件作为占位符
-        Path(f"{OUTPUT_DIR}/.no_data_in_this_partition").touch()
+        
+        # 使用最基础、最可靠的 open() 来创建空文件
+        placeholder_file = os.path.join(OUTPUT_DIR, ".no_data_found_in_this_partition")
+        with open(placeholder_file, "w") as f:
+            f.write("This partition failed to download any data.")
+        print(f"✅ 已创建标志文件: {placeholder_file}")
     # ---------------------------------------------
 
 if __name__ == "__main__":
