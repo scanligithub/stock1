@@ -1,5 +1,5 @@
 # scripts/collect_fundflow.py
-# 2025-11-19 最终全功能版：流式写入 + DuckDB排序 + 高级质检 + PyArrow兼容性修复
+# 2025-11-19 最终全功能版：流式写入 + DuckDB排序 + 高级质检 + PyArrow兼容性修复 + 增强安检门
 
 import os
 import pandas as pd
@@ -26,6 +26,9 @@ SMALL_OUTPUT_DIR = "fundflow_small"
 TEMP_UNSORTED_FILE = "full_fundflow_unsorted.parquet"
 FINAL_PARQUET_FILE = "full_fundflow.parquet"
 QUALITY_REPORT_FILE = "data_quality_report_fundflow.json"
+
+# 大文件预警阈值 (MB)，超过此大小仅打印日志，不跳过
+LARGE_FILE_WARNING_THRESHOLD_MB = 50 
 
 os.makedirs(SMALL_OUTPUT_DIR, exist_ok=True)
 
@@ -172,21 +175,58 @@ def main():
     if not files: print("没有找到任何分片文件，退出。"); return
     print(f"发现 {len(files)} 个资金流分片文件，开始处理...")
 
-    # --- 阶段 1: 复制小文件 ---
+    # --- 阶段 1: 复制小文件 (带安检门) ---
     if os.path.exists(SMALL_OUTPUT_DIR): shutil.rmtree(SMALL_OUTPUT_DIR)
     os.makedirs(SMALL_OUTPUT_DIR, exist_ok=True)
+    
+    files_copied = 0
+    skipped_files = 0
+    
     for f in tqdm(files, desc="复制资金流小文件"):
+        # [安检 1] 严格检查文件名后缀，防止 core dump 或 git 文件混入
+        if not f.lower().endswith(".parquet"):
+            print(f"⚠️ [安检拦截] 跳过非 Parquet 文件: {f}")
+            skipped_files += 1
+            continue
+            
+        # [安检 2] 检查文件大小 (仅报警，不跳过)
+        f_size = os.path.getsize(f)
+        f_size_mb = f_size / (1024 * 1024)
+        
+        if f_size_mb > LARGE_FILE_WARNING_THRESHOLD_MB:
+            print(f"⚠️ [大文件提示] 文件 {os.path.basename(f)} 大小为 {f_size_mb:.2f} MB (超过 {LARGE_FILE_WARNING_THRESHOLD_MB}MB)，确认复制。")
+        
+        # 执行复制
         filename = os.path.basename(f)
         shutil.copy2(f, os.path.join(SMALL_OUTPUT_DIR, filename))
-    print(f"所有小文件已收集至 {SMALL_OUTPUT_DIR}/")
+        files_copied += 1
+        
+    print(f"\n✅ 小文件收集完毕。成功: {files_copied}, 拦截非Parquet: {skipped_files}")
+    
+    # [新增] 调试打印：列出输出目录中最大的前5个文件
+    print(f"🔍 [调试] 检查 {SMALL_OUTPUT_DIR} 目录中最大的文件:")
+    try:
+        output_files = glob.glob(os.path.join(SMALL_OUTPUT_DIR, "*"))
+        # 按大小排序，取前5
+        output_files.sort(key=os.path.getsize, reverse=True)
+        for i, f in enumerate(output_files[:5]):
+            size_mb = os.path.getsize(f) / (1024 * 1024)
+            print(f"   {i+1}. {os.path.basename(f)} - {size_mb:.2f} MB")
+        if not output_files:
+            print("   (目录为空)")
+    except Exception as e:
+        print(f"   调试检查失败: {e}")
 
     # --- 阶段 2: 流式写入未排序的合并文件 ---
     chunk_size = 2000
     writer = None
     print(f"\n将以流式写入模式合并，每块 {chunk_size} 个文件...")
     try:
-        for i in tqdm(range(0, len(files), chunk_size), desc="分块写入 Parquet 中"):
-            chunk_files = files[i : i + chunk_size]
+        # 重新获取刚刚复制过去的文件列表，确保来源纯净
+        target_files = glob.glob(os.path.join(SMALL_OUTPUT_DIR, "*.parquet"))
+        
+        for i in tqdm(range(0, len(target_files), chunk_size), desc="分块写入 Parquet 中"):
+            chunk_files = target_files[i : i + chunk_size]
             
             dfs = []
             for f in chunk_files:
